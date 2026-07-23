@@ -13,7 +13,7 @@ The current foundation implements the manual journal and the first Phase 2 impor
 - save it on device with SwiftData;
 - browse visits chronologically;
 - add and remove detected or custom tags on each visit;
-- browse restaurants grouped by place, filter them by tag, and sort them by recency, visit count, or rating;
+- browse restaurants grouped by place, filter them by specific food or drink tags, and sort them by recency, visit count, or rating;
 - optionally back up journal metadata to the user’s private iCloud database and safely merge it during restore;
 - view a live-resolved restaurant address and a non-interactive location map;
 - browse an interactive photo map with each geotagged visit photo at its capture location;

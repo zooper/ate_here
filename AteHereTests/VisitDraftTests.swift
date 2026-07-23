@@ -391,6 +391,30 @@ struct VisitDraftTests {
 }
 
 struct RestaurantIndexTests {
+    @Test("Restaurant filter offers only specific food and drink tags")
+    func restaurantFilterExcludesContextAndCustomTags() {
+        let taggedVisit = visit(
+            placeID: "pizza-place",
+            date: 1_000,
+            rating: 5,
+            tags: [
+                "Pizza",
+                "Beer",
+                "Food",
+                "Menu",
+                "Receipt",
+                "Restaurant interior",
+                "Date night",
+            ]
+        )
+
+        let entries = RestaurantIndex.entries(from: [taggedVisit])
+        let tagCounts = RestaurantIndex.tagCounts(from: entries)
+
+        #expect(entries.first?.tags == ["Beer", "Pizza"])
+        #expect(tagCounts.map(\.tag) == ["Beer", "Pizza"])
+    }
+
     @Test("Restaurants are grouped and filtered by tag without counting repeat visits twice")
     func restaurantsGroupAndFilterByTag() {
         let recentPizza = visit(

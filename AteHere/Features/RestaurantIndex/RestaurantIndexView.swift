@@ -39,6 +39,12 @@ enum RestaurantIndex {
                 .flatMap(\.foodCategories)
                 .compactMap(VisitTagRules.normalizedTag)
                 .filter { tag in
+                    guard let category = FoodCategory(rawValue: tag) else {
+                        return false
+                    }
+                    return category.isRestaurantFoodEvidence
+                }
+                .filter { tag in
                     let key = tag.folding(
                         options: [.caseInsensitive, .diacriticInsensitive],
                         locale: .current
