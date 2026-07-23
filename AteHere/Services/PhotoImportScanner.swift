@@ -4,6 +4,97 @@ import Foundation
 import SwiftData
 import UIKit
 
+struct HomeExclusionRegion: Equatable, Sendable {
+    let latitude: Double
+    let longitude: Double
+    let radiusMeters: CLLocationDistance
+
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+
+    var isValid: Bool {
+        CLLocationCoordinate2DIsValid(coordinate)
+            && latitude.isFinite
+            && longitude.isFinite
+            && radiusMeters.isFinite
+            && radiusMeters > 0
+    }
+
+    func contains(_ candidate: DetectedVisitCandidate) -> Bool {
+        guard isValid,
+              let candidateLatitude = candidate.latitude,
+              let candidateLongitude = candidate.longitude else {
+            return false
+        }
+        let candidateCoordinate = CLLocationCoordinate2D(
+            latitude: candidateLatitude,
+            longitude: candidateLongitude
+        )
+        guard CLLocationCoordinate2DIsValid(candidateCoordinate) else {
+            return false
+        }
+
+        return CLLocation(latitude: latitude, longitude: longitude).distance(
+            from: CLLocation(
+                latitude: candidateLatitude,
+                longitude: candidateLongitude
+            )
+        ) <= radiusMeters
+    }
+}
+
+enum HomeExclusionSettings {
+    static let enabledKey = "homePhotoExclusionEnabled"
+    static let hasLocationKey = "homePhotoExclusionHasLocation"
+    static let latitudeKey = "homePhotoExclusionLatitude"
+    static let longitudeKey = "homePhotoExclusionLongitude"
+    static let radiusKey = "homePhotoExclusionRadiusMeters"
+    static let defaultRadiusMeters: CLLocationDistance = 200
+    static let availableRadii: [CLLocationDistance] = [100, 200, 300]
+
+    static func configuredRegion(
+        userDefaults: UserDefaults = .standard
+    ) -> HomeExclusionRegion? {
+        guard userDefaults.bool(forKey: hasLocationKey) else { return nil }
+
+        let storedRadius = userDefaults.double(forKey: radiusKey)
+        let region = HomeExclusionRegion(
+            latitude: userDefaults.double(forKey: latitudeKey),
+            longitude: userDefaults.double(forKey: longitudeKey),
+            radiusMeters: storedRadius > 0 ? storedRadius : defaultRadiusMeters
+        )
+        return region.isValid ? region : nil
+    }
+
+    static func activeRegion(
+        userDefaults: UserDefaults = .standard
+    ) -> HomeExclusionRegion? {
+        guard userDefaults.bool(forKey: enabledKey) else { return nil }
+        return configuredRegion(userDefaults: userDefaults)
+    }
+
+    static func save(
+        _ region: HomeExclusionRegion,
+        userDefaults: UserDefaults = .standard
+    ) {
+        guard region.isValid else { return }
+        userDefaults.set(region.latitude, forKey: latitudeKey)
+        userDefaults.set(region.longitude, forKey: longitudeKey)
+        userDefaults.set(region.radiusMeters, forKey: radiusKey)
+        userDefaults.set(true, forKey: hasLocationKey)
+        userDefaults.set(true, forKey: enabledKey)
+    }
+
+    static func remove(userDefaults: UserDefaults = .standard) {
+        userDefaults.set(false, forKey: enabledKey)
+        userDefaults.removeObject(forKey: hasLocationKey)
+        userDefaults.removeObject(forKey: latitudeKey)
+        userDefaults.removeObject(forKey: longitudeKey)
+        userDefaults.removeObject(forKey: radiusKey)
+    }
+}
+
 struct PhotoImportScanner: Sendable {
     let photoLibraryService: any PhotoLibraryService
     let photoAnalysisService: any PhotoAnalysisService
@@ -161,6 +252,23 @@ struct AutomaticPhotoScanService {
     let photoLibraryService: any PhotoLibraryService
     let photoAnalysisService: any PhotoAnalysisService
     var configuration: PhotoImportConfiguration = .init()
+    var homeExclusionRegion: HomeExclusionRegion?
+
+    @discardableResult
+    static func removePendingVisits(
+        inside region: HomeExclusionRegion,
+        from modelContext: ModelContext
+    ) throws -> Int {
+        let pendingVisits = try modelContext.fetch(FetchDescriptor<PendingVisit>())
+        let homeVisits = pendingVisits.filter { region.contains($0.candidate) }
+        for pendingVisit in homeVisits {
+            modelContext.delete(pendingVisit)
+        }
+        if !homeVisits.isEmpty {
+            try modelContext.save()
+        }
+        return homeVisits.count
+    }
 
     func scan(into modelContext: ModelContext, now: Date = .now) async throws -> Int {
         let access = photoLibraryService.authorizationStatus()
@@ -192,15 +300,19 @@ struct AutomaticPhotoScanService {
                 lookbackDays: configuration.lookbackDays
             )
         )
+        let suggestedCandidates = candidates.filter { candidate in
+            guard let homeExclusionRegion else { return true }
+            return !homeExclusionRegion.contains(candidate)
+        }
 
-        for candidate in candidates {
+        for candidate in suggestedCandidates {
             modelContext.insert(PendingVisit(candidate: candidate, detectedAt: now))
         }
-        if !candidates.isEmpty {
+        if !suggestedCandidates.isEmpty {
             try modelContext.save()
         }
         UserDefaults.standard.set(now, forKey: AutomaticPhotoScanSettings.lastScanDateKey)
-        return candidates.count
+        return suggestedCandidates.count
     }
 }
 

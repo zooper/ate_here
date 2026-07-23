@@ -28,6 +28,7 @@ The current foundation implements the manual journal and the first Phase 2 impor
 - show a coarse 5-point-step match score when useful food evidence is available;
 - review photo groups and confirm a restaurant before saving;
 - optionally scan for new food-related photos when the app opens;
+- optionally set a private home area that automatic scans ignore;
 - keep automatic matches in a private review inbox until they are confirmed or dismissed;
 - request occasional iOS background refresh time without automatically creating visits.
 
@@ -41,6 +42,11 @@ statistical confidence. Category-search hints are used only for the current
 Apple Maps lookup and are not persisted as restaurant records. The
 app has no developer-operated backend, account system, analytics SDK, hosted AI,
 or third-party runtime dependencies.
+
+The optional home area stores only a coordinate, radius, and enabled state in
+local settings. It is not included in iCloud journal backups. It affects only
+automatic suggestions; manually selected photos remain available, and photos
+without GPS are not silently excluded.
 
 iCloud journal backup is also opt-in. When enabled, it stores visit metadata,
 including dates, notes, tags, ratings, coordinates, durable Apple Place IDs, and

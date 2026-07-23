@@ -122,6 +122,45 @@ struct PhotoImportScannerFilteringTests {
 }
 
 struct AutomaticPhotoScanServiceTests {
+    @Test("Home exclusion contains nearby candidates but not distant or unlocated candidates")
+    func homeExclusionUsesCandidateLocation() {
+        let region = HomeExclusionRegion(
+            latitude: 40.7419,
+            longitude: -73.9898,
+            radiusMeters: 200
+        )
+        let nearby = candidate(latitude: 40.7420, longitude: -73.9897)
+        let distant = candidate(latitude: 40.7520, longitude: -73.9898)
+        let unlocated = candidate(latitude: nil, longitude: nil)
+
+        #expect(region.contains(nearby))
+        #expect(!region.contains(distant))
+        #expect(!region.contains(unlocated))
+    }
+
+    @Test("Home exclusion settings round-trip locally and respect the enabled state")
+    func homeExclusionSettingsRoundTrip() throws {
+        let suiteName = "HomeExclusionSettingsTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let region = HomeExclusionRegion(
+            latitude: 40.7419,
+            longitude: -73.9898,
+            radiusMeters: 300
+        )
+
+        HomeExclusionSettings.save(region, userDefaults: defaults)
+
+        #expect(HomeExclusionSettings.configuredRegion(userDefaults: defaults) == region)
+        #expect(HomeExclusionSettings.activeRegion(userDefaults: defaults) == region)
+
+        defaults.set(false, forKey: HomeExclusionSettings.enabledKey)
+        #expect(HomeExclusionSettings.activeRegion(userDefaults: defaults) == nil)
+
+        HomeExclusionSettings.remove(userDefaults: defaults)
+        #expect(HomeExclusionSettings.configuredRegion(userDefaults: defaults) == nil)
+    }
+
     @Test("Later automatic scans start near the previous scan instead of rescanning thirty days")
     func laterScanUsesWatermark() {
         let now = Date(timeIntervalSince1970: 10_000)
@@ -165,6 +204,73 @@ struct AutomaticPhotoScanServiceTests {
         #expect(pendingVisits.count == 1)
         #expect(pendingVisits.first?.photos.map(\.assetLocalIdentifier) == ["food"])
         #expect(pendingVisits.first?.foodCategories == ["Pizza"])
+    }
+
+    @MainActor
+    @Test("Automatic scanning does not suggest food photographed at home")
+    func homeFoodIsNotSuggested() async throws {
+        let container = try makeContainer()
+        let context = container.mainContext
+        let photo = PhotoMetadata(
+            assetIdentifier: "home-food",
+            capturedAt: Date(timeIntervalSince1970: 60),
+            latitude: 40.7419,
+            longitude: -73.9898
+        )
+        let service = AutomaticPhotoScanService(
+            photoLibraryService: StubPhotoLibraryService(
+                photos: [photo],
+                foodAssetIdentifiers: ["home-food"]
+            ),
+            photoAnalysisService: ImageWidthPhotoAnalysisService(),
+            homeExclusionRegion: HomeExclusionRegion(
+                latitude: 40.7419,
+                longitude: -73.9898,
+                radiusMeters: 200
+            )
+        )
+
+        let addedCount = try await service.scan(
+            into: context,
+            now: Date(timeIntervalSince1970: 120)
+        )
+        let pendingVisits = try context.fetch(FetchDescriptor<PendingVisit>())
+
+        #expect(addedCount == 0)
+        #expect(pendingVisits.isEmpty)
+    }
+
+    @MainActor
+    @Test("Enabling a home area removes existing home suggestions only")
+    func existingHomeSuggestionsAreRemoved() throws {
+        let container = try makeContainer()
+        let context = container.mainContext
+        context.insert(
+            PendingVisit(
+                candidate: candidate(latitude: 40.7419, longitude: -73.9898)
+            )
+        )
+        context.insert(
+            PendingVisit(
+                candidate: candidate(latitude: 40.7520, longitude: -73.9898)
+            )
+        )
+        try context.save()
+        let region = HomeExclusionRegion(
+            latitude: 40.7419,
+            longitude: -73.9898,
+            radiusMeters: 200
+        )
+
+        let removedCount = try AutomaticPhotoScanService.removePendingVisits(
+            inside: region,
+            from: context
+        )
+        let remainingVisits = try context.fetch(FetchDescriptor<PendingVisit>())
+
+        #expect(removedCount == 1)
+        #expect(remainingVisits.count == 1)
+        #expect(remainingVisits.first?.latitude == 40.7520)
     }
 
     @MainActor
@@ -214,6 +320,20 @@ struct AutomaticPhotoScanServiceTests {
                 isStoredInMemoryOnly: true,
                 cloudKitDatabase: .none
             )
+        )
+    }
+
+    private func candidate(
+        latitude: Double?,
+        longitude: Double?
+    ) -> DetectedVisitCandidate {
+        DetectedVisitCandidate(
+            id: UUID().uuidString,
+            visitedAt: .now,
+            latitude: latitude,
+            longitude: longitude,
+            photos: [],
+            foodCategories: ["Pizza"]
         )
     }
 }

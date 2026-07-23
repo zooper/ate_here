@@ -81,6 +81,22 @@ final class AteHereUITests: XCTestCase {
     }
 
     @MainActor
+    func testHomeAreaCanBeConfiguredWithoutRequestingLocationFirst() throws {
+        let app = makeApp()
+        app.launch()
+
+        app.buttons["Add"].tap()
+        app.buttons["Settings"].tap()
+        XCTAssertTrue(app.buttons["setHomeArea"].waitForExistence(timeout: 2))
+        app.buttons["setHomeArea"].tap()
+
+        XCTAssertTrue(app.navigationBars["Home Area"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.otherElements["homeAreaMap"].exists)
+        XCTAssertTrue(app.buttons["useCurrentHomeLocation"].exists)
+        XCTAssertFalse(app.buttons["saveHomeArea"].isEnabled)
+    }
+
+    @MainActor
     func testPhotoMapHasDedicatedTabAndEmptyState() throws {
         let app = makeApp()
         app.launch()

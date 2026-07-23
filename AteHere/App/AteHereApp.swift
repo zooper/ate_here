@@ -8,6 +8,7 @@ struct AteHereApp: App {
     init() {
         let isUITesting = ProcessInfo.processInfo.environment["ATE_HERE_UI_TESTING"] == "1"
         if isUITesting {
+            HomeExclusionSettings.remove()
             UserDefaults.standard.set(
                 false,
                 forKey: AutomaticPhotoScanSettings.enabledKey
@@ -68,7 +69,8 @@ struct AteHereApp: App {
         let context = ModelContext(modelContainer)
         let service = AutomaticPhotoScanService(
             photoLibraryService: LivePhotoLibraryService(),
-            photoAnalysisService: VisionPhotoAnalysisService()
+            photoAnalysisService: VisionPhotoAnalysisService(),
+            homeExclusionRegion: HomeExclusionSettings.activeRegion()
         )
         _ = try? await service.scan(into: context)
     }

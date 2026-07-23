@@ -30,6 +30,8 @@
 	<false/>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Ate Here scans only the photos you allow to find possible restaurant visits. Analysis stays on this iPhone.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Ate Here uses your location only when you choose it to set a private home area for automatic photo matching.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>

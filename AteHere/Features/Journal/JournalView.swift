@@ -1,3 +1,5 @@
+import CoreLocation
+import MapKit
 import SwiftData
 import SwiftUI
 import UIKit
@@ -247,7 +249,8 @@ struct JournalView: View {
 
         let service = AutomaticPhotoScanService(
             photoLibraryService: photoLibraryService,
-            photoAnalysisService: photoAnalysisService
+            photoAnalysisService: photoAnalysisService,
+            homeExclusionRegion: HomeExclusionSettings.activeRegion()
         )
         _ = try? await service.scan(into: modelContext)
         AutomaticPhotoScanScheduler.scheduleNext()
@@ -308,6 +311,12 @@ private struct JournalSettingsView: View {
     @Query(sort: \Visit.visitedAt, order: .reverse) private var visits: [Visit]
     @AppStorage(AutomaticPhotoScanSettings.enabledKey)
     private var automaticScanningEnabled = false
+    @AppStorage(HomeExclusionSettings.enabledKey)
+    private var homeExclusionEnabled = false
+    @AppStorage(HomeExclusionSettings.hasLocationKey)
+    private var hasHomeLocation = false
+    @AppStorage(HomeExclusionSettings.radiusKey)
+    private var homeExclusionRadius = HomeExclusionSettings.defaultRadiusMeters
     @AppStorage(ICloudJournalBackupSettings.enabledKey)
     private var iCloudBackupEnabled = false
     @AppStorage(ICloudJournalBackupSettings.lastBackupDateKey)
@@ -327,6 +336,7 @@ private struct JournalSettingsView: View {
     @State private var backupErrorMessage: String?
     @State private var backupNotice: String?
     @State private var isBackupOperationRunning = false
+    @State private var isPresentingHomeAreaPicker = false
 
     var body: some View {
         NavigationStack {
@@ -362,6 +372,45 @@ private struct JournalSettingsView: View {
                             .foregroundStyle(.secondary)
                         }
                     }
+                }
+
+                Section {
+                    if hasHomeLocation {
+                        Toggle(
+                            "Ignore photos taken at home",
+                            isOn: $homeExclusionEnabled
+                        )
+                        .accessibilityIdentifier("homeExclusionToggle")
+
+                        Picker("Home area radius", selection: $homeExclusionRadius) {
+                            ForEach(HomeExclusionSettings.availableRadii, id: \.self) { radius in
+                                Text("\(Int(radius)) m").tag(radius)
+                            }
+                        }
+
+                        Button("Adjust Home Area") {
+                            isPresentingHomeAreaPicker = true
+                        }
+                        .accessibilityIdentifier("adjustHomeArea")
+
+                        Button("Remove Home Area", role: .destructive) {
+                            HomeExclusionSettings.remove()
+                            hasHomeLocation = false
+                            homeExclusionEnabled = false
+                            homeExclusionRadius = HomeExclusionSettings.defaultRadiusMeters
+                        }
+                    } else {
+                        Button {
+                            isPresentingHomeAreaPicker = true
+                        } label: {
+                            Label("Set Home Area", systemImage: "house")
+                        }
+                        .accessibilityIdentifier("setHomeArea")
+                    }
+                } header: {
+                    Text("Home area")
+                } footer: {
+                    Text("Automatic scans ignore located photo groups inside this area. Manual photo import still includes them, and photos without GPS remain eligible.")
                 }
 
                 Section {
@@ -437,6 +486,17 @@ private struct JournalSettingsView: View {
             await performBackupOperation(operation)
             backupOperationRequest = nil
         }
+        .sheet(isPresented: $isPresentingHomeAreaPicker) {
+            HomeAreaPickerView(
+                initialRegion: HomeExclusionSettings.configuredRegion()
+            ) { region in
+                HomeExclusionSettings.save(region)
+                removePendingHomeSuggestions(inside: region)
+                hasHomeLocation = true
+                homeExclusionEnabled = true
+                homeExclusionRadius = region.radiusMeters
+            }
+        }
         .onChange(of: automaticScanningEnabled) { _, enabled in
             if enabled {
                 UserDefaults.standard.removeObject(
@@ -446,6 +506,19 @@ private struct JournalSettingsView: View {
             } else {
                 AutomaticPhotoScanScheduler.cancel()
             }
+        }
+        .onChange(of: homeExclusionEnabled) { _, enabled in
+            guard enabled, let region = HomeExclusionSettings.activeRegion() else {
+                return
+            }
+            removePendingHomeSuggestions(inside: region)
+        }
+        .onChange(of: homeExclusionRadius) { _, _ in
+            guard homeExclusionEnabled,
+                  let region = HomeExclusionSettings.activeRegion() else {
+                return
+            }
+            removePendingHomeSuggestions(inside: region)
         }
         .alert("Photos access is needed", isPresented: $isShowingAccessAlert) {
             Button("Open Settings") {
@@ -596,6 +669,13 @@ private struct JournalSettingsView: View {
         return "Restored \(changedCount) visit\(changedCount == 1 ? "" : "s") from iCloud."
     }
 
+    private func removePendingHomeSuggestions(inside region: HomeExclusionRegion) {
+        _ = try? AutomaticPhotoScanService.removePendingVisits(
+            inside: region,
+            from: modelContext
+        )
+    }
+
     @MainActor
     private func configureAutomaticScanningIfNeeded() async {
         guard permissionRequestID != nil, automaticScanningEnabled else { return }
@@ -628,6 +708,276 @@ private extension Notification.Name {
     static let automaticPhotoScanRequested = Notification.Name(
         "io.jonsson.atehere.automatic-photo-scan-requested"
     )
+}
+
+private struct HomeAreaPickerView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let onSave: (HomeExclusionRegion) -> Void
+
+    @StateObject private var locationProvider = HomeLocationProvider()
+    @State private var selectedCoordinate: CLLocationCoordinate2D?
+    @State private var radiusMeters: CLLocationDistance
+    @State private var cameraPosition: MapCameraPosition
+    @State private var locationRequestID: UUID?
+    @State private var isRequestingLocation = false
+    @State private var locationErrorMessage: String?
+
+    init(
+        initialRegion: HomeExclusionRegion?,
+        onSave: @escaping (HomeExclusionRegion) -> Void
+    ) {
+        self.onSave = onSave
+        _selectedCoordinate = State(initialValue: initialRegion?.coordinate)
+        _radiusMeters = State(
+            initialValue: initialRegion?.radiusMeters
+                ?? HomeExclusionSettings.defaultRadiusMeters
+        )
+
+        if let initialRegion {
+            _cameraPosition = State(
+                initialValue: .region(
+                    MKCoordinateRegion(
+                        center: initialRegion.coordinate,
+                        latitudinalMeters: 1_200,
+                        longitudinalMeters: 1_200
+                    )
+                )
+            )
+        } else {
+            _cameraPosition = State(
+                initialValue: .userLocation(
+                    followsHeading: false,
+                    fallback: .automatic
+                )
+            )
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                ZStack {
+                    Map(position: $cameraPosition) {
+                        UserAnnotation()
+                        if let selectedCoordinate {
+                            MapCircle(
+                                center: selectedCoordinate,
+                                radius: radiusMeters
+                            )
+                            .foregroundStyle(AlbumTheme.burgundy.opacity(0.18))
+                        }
+                    }
+                    .onMapCameraChange(frequency: .onEnd) { context in
+                        guard cameraPosition.positionedByUser else { return }
+                        selectedCoordinate = context.region.center
+                    }
+
+                    Image(systemName: "house.circle.fill")
+                        .font(.system(size: 38))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(AlbumTheme.photoPaper, AlbumTheme.burgundy)
+                        .shadow(color: AlbumTheme.ink.opacity(0.28), radius: 4, y: 2)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+                .frame(maxHeight: .infinity)
+                .accessibilityIdentifier("homeAreaMap")
+
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Move the map until the house marks home. The shaded circle is the area automatic scans will ignore.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    Button {
+                        locationRequestID = UUID()
+                    } label: {
+                        HStack {
+                            Label("Use Current Location", systemImage: "location.fill")
+                            Spacer()
+                            if isRequestingLocation {
+                                ProgressView()
+                            }
+                        }
+                    }
+                    .disabled(isRequestingLocation)
+                    .accessibilityIdentifier("useCurrentHomeLocation")
+
+                    Picker("Home area radius", selection: $radiusMeters) {
+                        ForEach(HomeExclusionSettings.availableRadii, id: \.self) { radius in
+                            Text("\(Int(radius)) m").tag(radius)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    Label(
+                        "This coordinate stays on this iPhone and is not included in journal backups.",
+                        systemImage: "lock"
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(20)
+                .background(AlbumTheme.paper)
+            }
+            .navigationTitle("Home Area")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        save()
+                    }
+                    .disabled(selectedCoordinate == nil)
+                    .accessibilityIdentifier("saveHomeArea")
+                }
+            }
+        }
+        .tint(AlbumTheme.burgundy)
+        .task(id: locationRequestID) {
+            guard locationRequestID != nil else { return }
+            isRequestingLocation = true
+            defer { isRequestingLocation = false }
+
+            do {
+                let coordinate = try await locationProvider.currentLocation()
+                try Task.checkCancellation()
+                selectedCoordinate = coordinate
+                cameraPosition = .region(
+                    MKCoordinateRegion(
+                        center: coordinate,
+                        latitudinalMeters: 1_200,
+                        longitudinalMeters: 1_200
+                    )
+                )
+                locationErrorMessage = nil
+            } catch is CancellationError {
+                return
+            } catch {
+                locationErrorMessage = error.localizedDescription
+            }
+        }
+        .alert(
+            "Location unavailable",
+            isPresented: Binding(
+                get: { locationErrorMessage != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        locationErrorMessage = nil
+                    }
+                }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(locationErrorMessage ?? "Try again or move the map manually.")
+        }
+    }
+
+    private func save() {
+        guard let selectedCoordinate else { return }
+        onSave(
+            HomeExclusionRegion(
+                latitude: selectedCoordinate.latitude,
+                longitude: selectedCoordinate.longitude,
+                radiusMeters: radiusMeters
+            )
+        )
+        dismiss()
+    }
+}
+
+@MainActor
+private final class HomeLocationProvider: NSObject, ObservableObject, @preconcurrency CLLocationManagerDelegate {
+    private let manager = CLLocationManager()
+    private var continuation: CheckedContinuation<CLLocationCoordinate2D, Error>?
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+    }
+
+    func currentLocation() async throws -> CLLocationCoordinate2D {
+        guard continuation == nil else {
+            throw HomeLocationError.requestAlreadyRunning
+        }
+        guard CLLocationManager.locationServicesEnabled() else {
+            throw HomeLocationError.servicesDisabled
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            requestLocationForCurrentAuthorization()
+        }
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        guard continuation != nil else { return }
+        requestLocationForCurrentAuthorization()
+    }
+
+    func locationManager(
+        _ manager: CLLocationManager,
+        didUpdateLocations locations: [CLLocation]
+    ) {
+        guard let location = locations.last, location.horizontalAccuracy >= 0 else {
+            finish(throwing: HomeLocationError.locationUnavailable)
+            return
+        }
+        finish(returning: location.coordinate)
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        finish(throwing: error)
+    }
+
+    private func requestLocationForCurrentAuthorization() {
+        switch manager.authorizationStatus {
+        case .notDetermined:
+            manager.requestWhenInUseAuthorization()
+        case .authorizedAlways, .authorizedWhenInUse:
+            manager.requestLocation()
+        case .denied, .restricted:
+            finish(throwing: HomeLocationError.permissionDenied)
+        @unknown default:
+            finish(throwing: HomeLocationError.locationUnavailable)
+        }
+    }
+
+    private func finish(returning coordinate: CLLocationCoordinate2D) {
+        continuation?.resume(returning: coordinate)
+        continuation = nil
+    }
+
+    private func finish(throwing error: Error) {
+        continuation?.resume(throwing: error)
+        continuation = nil
+    }
+}
+
+private enum HomeLocationError: LocalizedError {
+    case locationUnavailable
+    case permissionDenied
+    case requestAlreadyRunning
+    case servicesDisabled
+
+    var errorDescription: String? {
+        switch self {
+        case .locationUnavailable:
+            "Your location couldn’t be determined. Move the map manually or try again."
+        case .permissionDenied:
+            "Location access is off for Ate Here. Move the map manually, or allow access in Settings."
+        case .requestAlreadyRunning:
+            "A location request is already in progress."
+        case .servicesDisabled:
+            "Location Services are turned off. Move the map manually, or enable them in Settings."
+        }
+    }
 }
 
 private struct AlbumMonth: Identifiable {
