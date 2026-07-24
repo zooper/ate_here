@@ -74,4 +74,95 @@ final class Visit {
         }
         updatedAt = now
     }
+
+    func absorb(_ other: Visit, now: Date = .now) {
+        let existingPhotoIdentifiers = Set(photos.map(\.assetLocalIdentifier))
+        for photo in other.photos
+        where !existingPhotoIdentifiers.contains(photo.assetLocalIdentifier) {
+            photo.visit = self
+            photos.append(photo)
+        }
+
+        visitedAt = min(visitedAt, other.visitedAt)
+        createdAt = min(createdAt, other.createdAt)
+        if applePlaceID == nil, userDefinedPlaceName == nil {
+            applePlaceID = other.applePlaceID
+            userDefinedPlaceName = other.userDefinedPlaceName
+        }
+        if rating == nil {
+            rating = other.rating
+        }
+        notes = Self.mergedNotes(notes, other.notes)
+        foodCategories = Array(
+            Set(foodCategories).union(other.foodCategories)
+        ).sorted()
+        updateLocation(fallbackVisit: other)
+        normalizePrimaryPhoto()
+        updatedAt = now
+    }
+
+    private func updateLocation(fallbackVisit: Visit) {
+        let locatedPhotos = photos.compactMap { photo -> (Double, Double)? in
+            guard let latitude = photo.latitude, let longitude = photo.longitude else {
+                return nil
+            }
+            return (latitude, longitude)
+        }
+        guard !locatedPhotos.isEmpty else {
+            if latitude == nil || longitude == nil {
+                latitude = fallbackVisit.latitude
+                longitude = fallbackVisit.longitude
+            }
+            return
+        }
+
+        latitude = locatedPhotos.map(\.0).reduce(0, +) / Double(locatedPhotos.count)
+        longitude = locatedPhotos.map(\.1).reduce(0, +) / Double(locatedPhotos.count)
+    }
+
+    private func normalizePrimaryPhoto() {
+        guard let primaryPhoto = photos.min(by: {
+            ($0.capturedAt ?? .distantFuture) < ($1.capturedAt ?? .distantFuture)
+        }) else {
+            return
+        }
+        for photo in photos {
+            photo.isPrimary = photo === primaryPhoto
+        }
+    }
+
+    private static func mergedNotes(_ first: String, _ second: String) -> String {
+        var notes: [String] = []
+        for note in [first, second] {
+            let normalized = note.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !normalized.isEmpty, !notes.contains(normalized) {
+                notes.append(normalized)
+            }
+        }
+        return notes.joined(separator: "\n\n")
+    }
+}
+
+@MainActor
+enum VisitMergeService {
+    static func merge(
+        visitIDs: Set<UUID>,
+        from visits: [Visit],
+        in modelContext: ModelContext,
+        now: Date = .now
+    ) throws -> Visit? {
+        let selectedVisits = visits
+            .filter { visitIDs.contains($0.id) }
+            .sorted { $0.visitedAt < $1.visitedAt }
+        guard selectedVisits.count >= 2, let target = selectedVisits.first else {
+            return nil
+        }
+
+        for visit in selectedVisits.dropFirst() {
+            target.absorb(visit, now: now)
+            modelContext.delete(visit)
+        }
+        try modelContext.save()
+        return target
+    }
 }

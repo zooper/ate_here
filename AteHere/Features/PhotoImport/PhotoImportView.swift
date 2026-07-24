@@ -247,6 +247,8 @@ struct PendingVisitsView: View {
 
     @State private var selectedVisit: PendingVisit?
     @State private var persistenceError: Error?
+    @State private var isSelecting = false
+    @State private var selectedVisitIDs: Set<String> = []
 
     var body: some View {
         NavigationStack {
@@ -261,26 +263,16 @@ struct PendingVisitsView: View {
                     List {
                         Section {
                             ForEach(pendingVisits) { pendingVisit in
-                                Button {
-                                    selectedVisit = pendingVisit
-                                } label: {
-                                    CandidateRow(
-                                        candidate: pendingVisit.candidate,
-                                        photoLibraryService: photoLibraryService
-                                    )
-                                }
-                                .buttonStyle(.plain)
-                                .swipeActions(edge: .trailing) {
-                                    Button("Dismiss", role: .destructive) {
-                                        dismissMatch(pendingVisit)
-                                    }
-                                }
-                                .accessibilityIdentifier("pendingVisit")
+                                pendingVisitRow(pendingVisit)
                             }
                         } header: {
                             Text("Ready when you are")
                         } footer: {
-                            Text("Open a match to confirm the restaurant. Dismiss removes it from future scans.")
+                            Text(
+                                isSelecting
+                                    ? "Choose two or more matches from the same outing."
+                                    : "Open a match to confirm the restaurant. Dismiss removes it from future scans."
+                            )
                         }
                     }
                     .listStyle(.insetGrouped)
@@ -293,9 +285,38 @@ struct PendingVisitsView: View {
             .toolbarBackground(AlbumTheme.paper, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    if isSelecting {
+                        Button("Cancel", action: stopSelecting)
+                    } else {
+                        Button("Done") {
+                            dismiss()
+                        }
+                    }
+                }
+
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        dismiss()
+                    if !isSelecting, pendingVisits.count >= 2 {
+                        Button("Select") {
+                            isSelecting = true
+                        }
+                        .accessibilityIdentifier("selectPendingVisits")
+                    }
+                }
+
+                ToolbarItemGroup(placement: .bottomBar) {
+                    if isSelecting {
+                        Spacer()
+
+                        Button(
+                            selectedVisitIDs.isEmpty
+                                ? "Merge"
+                                : "Merge \(selectedVisitIDs.count)",
+                            action: mergeSelectedVisits
+                        )
+                        .fontWeight(.semibold)
+                        .disabled(selectedVisitIDs.count < 2)
+                        .accessibilityIdentifier("mergePendingVisits")
                     }
                 }
             }
@@ -320,6 +341,83 @@ struct PendingVisitsView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text("Try again in a moment.")
+        }
+    }
+
+    @ViewBuilder
+    private func pendingVisitRow(_ pendingVisit: PendingVisit) -> some View {
+        if isSelecting {
+            Button {
+                if selectedVisitIDs.contains(pendingVisit.id) {
+                    selectedVisitIDs.remove(pendingVisit.id)
+                } else {
+                    selectedVisitIDs.insert(pendingVisit.id)
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(
+                        systemName: selectedVisitIDs.contains(pendingVisit.id)
+                            ? "checkmark.circle.fill"
+                            : "circle"
+                    )
+                    .font(.title3)
+                    .foregroundStyle(AlbumTheme.burgundy)
+                    .accessibilityHidden(true)
+
+                    CandidateRow(
+                        candidate: pendingVisit.candidate,
+                        photoLibraryService: photoLibraryService,
+                        showsDisclosureIndicator: false
+                    )
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(
+                "Match from \(pendingVisit.visitedAt.formatted(date: .abbreviated, time: .shortened))"
+            )
+            .accessibilityValue(
+                selectedVisitIDs.contains(pendingVisit.id) ? "Selected" : "Not selected"
+            )
+            .accessibilityIdentifier("selectPendingVisit-\(pendingVisit.id)")
+        } else {
+            Button {
+                selectedVisit = pendingVisit
+            } label: {
+                CandidateRow(
+                    candidate: pendingVisit.candidate,
+                    photoLibraryService: photoLibraryService
+                )
+            }
+            .buttonStyle(.plain)
+            .swipeActions(edge: .trailing) {
+                Button("Dismiss", role: .destructive) {
+                    dismissMatch(pendingVisit)
+                }
+            }
+            .accessibilityIdentifier("pendingVisit")
+        }
+    }
+
+    private func stopSelecting() {
+        selectedVisitIDs.removeAll()
+        isSelecting = false
+    }
+
+    private func mergeSelectedVisits() {
+        do {
+            guard let mergedVisit = try PendingVisitMergeService.merge(
+                visitIDs: selectedVisitIDs,
+                from: pendingVisits,
+                in: modelContext
+            ) else {
+                return
+            }
+
+            stopSelecting()
+            selectedVisit = mergedVisit
+        } catch {
+            modelContext.rollback()
+            persistenceError = error
         }
     }
 
@@ -352,6 +450,7 @@ struct PendingVisitsView: View {
 private struct CandidateRow: View {
     let candidate: DetectedVisitCandidate
     let photoLibraryService: any PhotoLibraryService
+    var showsDisclosureIndicator = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -373,10 +472,12 @@ private struct CandidateRow: View {
 
                 Spacer()
 
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-                    .accessibilityHidden(true)
+                if showsDisclosureIndicator {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                }
             }
 
             if !candidate.foodCategories.isEmpty {

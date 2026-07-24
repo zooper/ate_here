@@ -207,6 +207,163 @@ struct AutomaticPhotoScanServiceTests {
     }
 
     @MainActor
+    @Test("A later photo from the same meal extends the pending visit")
+    func laterPhotoExtendsPendingVisit() async throws {
+        let defaults = UserDefaults.standard
+        let lastScanKey = AutomaticPhotoScanSettings.lastScanDateKey
+        let originalLastScanDate = defaults.object(forKey: lastScanKey)
+        defaults.removeObject(forKey: lastScanKey)
+        defer {
+            if let originalLastScanDate {
+                defaults.set(originalLastScanDate, forKey: lastScanKey)
+            } else {
+                defaults.removeObject(forKey: lastScanKey)
+            }
+        }
+
+        let container = try makeContainer()
+        let context = container.mainContext
+        let mealStart = Date(timeIntervalSince1970: 10_000)
+        let library = MutableStubPhotoLibraryService(
+            photos: [
+                PhotoMetadata(
+                    assetIdentifier: "first-food-photo",
+                    capturedAt: mealStart,
+                    latitude: 40.7419,
+                    longitude: -73.9898
+                ),
+            ]
+        )
+        let service = AutomaticPhotoScanService(
+            photoLibraryService: library,
+            photoAnalysisService: ImageWidthPhotoAnalysisService()
+        )
+
+        let firstAddedCount = try await service.scan(
+            into: context,
+            now: mealStart.addingTimeInterval(60)
+        )
+        library.photos.append(
+            PhotoMetadata(
+                assetIdentifier: "second-food-photo",
+                capturedAt: mealStart.addingTimeInterval(10 * 60),
+                latitude: 40.7419,
+                longitude: -73.9898
+            )
+        )
+        let secondAddedCount = try await service.scan(
+            into: context,
+            now: mealStart.addingTimeInterval(11 * 60)
+        )
+        let pendingVisits = try context.fetch(FetchDescriptor<PendingVisit>())
+
+        #expect(firstAddedCount == 1)
+        #expect(secondAddedCount == 0)
+        #expect(pendingVisits.count == 1)
+        #expect(
+            Set(pendingVisits.first?.photos.map(\.assetLocalIdentifier) ?? [])
+                == ["first-food-photo", "second-food-photo"]
+        )
+    }
+
+    @MainActor
+    @Test("Existing split suggestions from one meal are coalesced")
+    func existingSplitSuggestionsAreCoalesced() async throws {
+        let container = try makeContainer()
+        let context = container.mainContext
+        let mealStart = Date(timeIntervalSince1970: 20_000)
+        context.insert(
+            PendingVisit(
+                candidate: foodCandidate(
+                    id: "first-food-photo",
+                    capturedAt: mealStart
+                )
+            )
+        )
+        context.insert(
+            PendingVisit(
+                candidate: foodCandidate(
+                    id: "second-food-photo",
+                    capturedAt: mealStart.addingTimeInterval(10 * 60)
+                )
+            )
+        )
+        try context.save()
+        let service = AutomaticPhotoScanService(
+            photoLibraryService: MutableStubPhotoLibraryService(photos: []),
+            photoAnalysisService: ImageWidthPhotoAnalysisService()
+        )
+
+        let addedCount = try await service.scan(
+            into: context,
+            now: mealStart.addingTimeInterval(24 * 60 * 60)
+        )
+        let pendingVisits = try context.fetch(FetchDescriptor<PendingVisit>())
+
+        #expect(addedCount == 0)
+        #expect(pendingVisits.count == 1)
+        #expect(
+            Set(pendingVisits.first?.photos.map(\.assetLocalIdentifier) ?? [])
+                == ["first-food-photo", "second-food-photo"]
+        )
+    }
+
+    @MainActor
+    @Test("A manual merge combines the selected suggestions regardless of distance")
+    func manualMergeCombinesSelectedSuggestions() throws {
+        let container = try makeContainer()
+        let context = container.mainContext
+        let first = PendingVisit(
+            candidate: foodCandidate(
+                id: "restaurant-photo",
+                capturedAt: Date(timeIntervalSince1970: 30_000),
+                latitude: 40.7419,
+                longitude: -73.9898,
+                foodCategory: "Pizza"
+            )
+        )
+        let second = PendingVisit(
+            candidate: foodCandidate(
+                id: "late-photo",
+                capturedAt: Date(timeIntervalSince1970: 30_000 + 4 * 60 * 60),
+                latitude: 40.8519,
+                longitude: -73.8898,
+                foodCategory: "Dessert"
+            )
+        )
+        let untouched = PendingVisit(
+            candidate: foodCandidate(
+                id: "another-visit",
+                capturedAt: Date(timeIntervalSince1970: 60_000),
+                latitude: 41.0,
+                longitude: -74.0,
+                foodCategory: "Sushi"
+            )
+        )
+        context.insert(first)
+        context.insert(second)
+        context.insert(untouched)
+        try context.save()
+
+        let mergedVisit = try PendingVisitMergeService.merge(
+            visitIDs: [first.id, second.id],
+            from: [first, second, untouched],
+            in: context
+        )
+        let pendingVisits = try context.fetch(FetchDescriptor<PendingVisit>())
+
+        #expect(mergedVisit === first)
+        #expect(pendingVisits.count == 2)
+        #expect(
+            Set(mergedVisit?.photos.map(\.assetLocalIdentifier) ?? [])
+                == ["restaurant-photo", "late-photo"]
+        )
+        #expect(mergedVisit?.foodCategories == ["Dessert", "Pizza"])
+        #expect(pendingVisits.contains { $0.id == untouched.id })
+        #expect(mergedVisit?.photos.filter(\.isPrimary).count == 1)
+    }
+
+    @MainActor
     @Test("Automatic scanning does not suggest food photographed at home")
     func homeFoodIsNotSuggested() async throws {
         let container = try makeContainer()
@@ -336,6 +493,32 @@ struct AutomaticPhotoScanServiceTests {
             foodCategories: ["Pizza"]
         )
     }
+
+    private func foodCandidate(
+        id: String,
+        capturedAt: Date,
+        latitude: Double = 40.7419,
+        longitude: Double = -73.9898,
+        foodCategory: String = "Pizza"
+    ) -> DetectedVisitCandidate {
+        DetectedVisitCandidate(
+            id: id,
+            visitedAt: capturedAt,
+            latitude: latitude,
+            longitude: longitude,
+            photos: [
+                VisitPhotoDraft(
+                    assetLocalIdentifier: id,
+                    capturedAt: capturedAt,
+                    latitude: latitude,
+                    longitude: longitude,
+                    classificationLabels: [foodCategory],
+                    isPrimary: true
+                ),
+            ],
+            foodCategories: [foodCategory]
+        )
+    }
 }
 
 private struct StubPhotoLibraryService: PhotoLibraryService {
@@ -415,5 +598,75 @@ private struct ImageWidthPhotoAnalysisService: PhotoAnalysisService {
     func classifications(for image: CGImage) async throws -> [FoodClassification] {
         guard image.width == 10 else { return [] }
         return [FoodClassification(category: .pizza, confidence: 0.9)]
+    }
+}
+
+@MainActor
+private final class MutableStubPhotoLibraryService: PhotoLibraryService {
+    var photos: [PhotoMetadata]
+
+    init(photos: [PhotoMetadata]) {
+        self.photos = photos
+    }
+
+    func authorizationStatus() -> PhotoLibraryAccess {
+        .full
+    }
+
+    func requestAuthorization() async -> PhotoLibraryAccess {
+        .full
+    }
+
+    func recentPhotos(
+        since startDate: Date,
+        excludingAssetIdentifiers: Set<String>,
+        limit: Int
+    ) -> [PhotoMetadata] {
+        Array(
+            photos
+                .filter {
+                    $0.capturedAt >= startDate
+                        && !excludingAssetIdentifiers.contains($0.assetIdentifier)
+                }
+                .sorted { $0.capturedAt > $1.capturedAt }
+                .prefix(limit)
+        )
+    }
+
+    func photoReferences(forAssetIdentifiers identifiers: [String]) -> [VisitPhotoDraft] {
+        photos
+            .filter { identifiers.contains($0.assetIdentifier) }
+            .map(photoReference)
+    }
+
+    func accessiblePhotoReferences(limit: Int) -> [VisitPhotoDraft] {
+        Array(photos.prefix(limit)).map(photoReference)
+    }
+
+    func image(
+        for assetIdentifier: String,
+        targetSize: CGSize,
+        contentMode: PhotoImageContentMode
+    ) async throws -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(
+            size: CGSize(width: 10, height: 10),
+            format: format
+        ).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 10, height: 10))
+        }
+    }
+
+    private func photoReference(_ photo: PhotoMetadata) -> VisitPhotoDraft {
+        VisitPhotoDraft(
+            assetLocalIdentifier: photo.assetIdentifier,
+            capturedAt: photo.capturedAt,
+            latitude: photo.latitude,
+            longitude: photo.longitude,
+            classificationLabels: [],
+            isPrimary: false
+        )
     }
 }

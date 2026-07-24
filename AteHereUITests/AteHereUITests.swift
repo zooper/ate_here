@@ -168,6 +168,68 @@ final class AteHereUITests: XCTestCase {
     }
 
     @MainActor
+    func testPendingMatchesCanBeSelectedAndMerged() throws {
+        let app = makeApp()
+        app.launchEnvironment["ATE_HERE_UI_TEST_PENDING_VISITS"] = "1"
+        app.launch()
+
+        app.buttons["Review 2 Matches"].tap()
+        XCTAssertTrue(app.navigationBars["Review Matches"].waitForExistence(timeout: 2))
+        app.buttons["selectPendingVisits"].tap()
+
+        let firstMatch = app.buttons["selectPendingVisit-first-food-photo"]
+        let secondMatch = app.buttons["selectPendingVisit-second-food-photo"]
+        XCTAssertTrue(firstMatch.waitForExistence(timeout: 2))
+        XCTAssertTrue(secondMatch.exists)
+        firstMatch.tap()
+        secondMatch.tap()
+
+        let selectionScreenshot = XCTAttachment(screenshot: app.screenshot())
+        selectionScreenshot.name = "Select Matches to Merge"
+        selectionScreenshot.lifetime = .keepAlways
+        add(selectionScreenshot)
+
+        XCTAssertTrue(app.buttons["mergePendingVisits"].isEnabled)
+        app.buttons["mergePendingVisits"].tap()
+
+        XCTAssertTrue(app.navigationBars["Review Visit"].waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    func testSavedJournalVisitsCanBeSelectedAndMerged() throws {
+        let app = makeApp()
+        app.launchEnvironment["ATE_HERE_UI_TEST_JOURNAL_MERGE"] = "1"
+        app.launch()
+
+        XCTAssertTrue(app.buttons["selectJournalVisits"].waitForExistence(timeout: 2))
+        app.buttons["selectJournalVisits"].tap()
+
+        let firstVisit = app.buttons[
+            "selectJournalVisit-00000000-0000-0000-0000-000000000101"
+        ]
+        let secondVisit = app.buttons[
+            "selectJournalVisit-00000000-0000-0000-0000-000000000102"
+        ]
+        XCTAssertTrue(firstVisit.waitForExistence(timeout: 2))
+        XCTAssertTrue(secondVisit.exists)
+        firstVisit.tap()
+        secondVisit.tap()
+
+        let selectionScreenshot = XCTAttachment(screenshot: app.screenshot())
+        selectionScreenshot.name = "Select Journal Visits to Merge"
+        selectionScreenshot.lifetime = .keepAlways
+        add(selectionScreenshot)
+
+        XCTAssertTrue(app.buttons["mergeJournalVisits"].isEnabled)
+        app.buttons["mergeJournalVisits"].tap()
+        XCTAssertTrue(app.alerts["Merge 2 visits?"].waitForExistence(timeout: 2))
+        app.alerts.buttons["Merge Visits"].tap()
+
+        XCTAssertTrue(app.staticTexts["2 meals remembered"].waitForExistence(timeout: 2))
+        XCTAssertEqual(app.buttons.matching(identifier: "visitRow").count, 2)
+    }
+
+    @MainActor
     private func makeApp() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["ATE_HERE_UI_TESTING"] = "1"

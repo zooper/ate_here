@@ -116,6 +116,95 @@ struct VisitDraftTests {
     }
 
     @MainActor
+    @Test("Merging saved visits preserves their journal details and photos")
+    func savedVisitsMergeWithoutLosingDetails() throws {
+        let schema = Schema([Visit.self, VisitPhoto.self])
+        let configuration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(
+            for: schema,
+            configurations: configuration
+        )
+        let context = container.mainContext
+        let firstDate = Date(timeIntervalSince1970: 10_000)
+        let secondDate = firstDate.addingTimeInterval(10 * 60)
+        let updateDate = secondDate.addingTimeInterval(60)
+        let first = Visit(
+            visitedAt: firstDate,
+            latitude: 40.7418,
+            longitude: -73.9899,
+            applePlaceID: "satis-bistro",
+            notes: "Dinner with friends"
+        )
+        first.foodCategories = ["Burger"]
+        first.photos = [
+            VisitPhoto(
+                assetLocalIdentifier: "first-photo",
+                capturedAt: firstDate,
+                latitude: 40.7418,
+                longitude: -73.9899,
+                classificationLabels: ["Burger"],
+                isPrimary: true
+            ),
+        ]
+        let second = Visit(
+            visitedAt: secondDate,
+            latitude: 40.7420,
+            longitude: -73.9897,
+            applePlaceID: "satis-bistro",
+            rating: 4,
+            notes: "Great fries"
+        )
+        second.foodCategories = ["Fries"]
+        second.photos = [
+            VisitPhoto(
+                assetLocalIdentifier: "second-photo",
+                capturedAt: secondDate,
+                latitude: 40.7420,
+                longitude: -73.9897,
+                classificationLabels: ["Fries"],
+                isPrimary: true
+            ),
+        ]
+        let untouched = Visit(
+            visitedAt: Date(timeIntervalSince1970: 20_000),
+            userDefinedPlaceName: "Eataly"
+        )
+        context.insert(first)
+        context.insert(second)
+        context.insert(untouched)
+        try context.save()
+
+        let mergedVisit = try VisitMergeService.merge(
+            visitIDs: [first.id, second.id],
+            from: [first, second, untouched],
+            in: context,
+            now: updateDate
+        )
+        let visits = try context.fetch(FetchDescriptor<Visit>())
+
+        #expect(mergedVisit === first)
+        #expect(visits.count == 2)
+        #expect(mergedVisit?.visitedAt == firstDate)
+        #expect(mergedVisit?.applePlaceID == "satis-bistro")
+        #expect(mergedVisit?.rating == 4)
+        #expect(mergedVisit?.notes == "Dinner with friends\n\nGreat fries")
+        #expect(mergedVisit?.foodCategories == ["Burger", "Fries"])
+        #expect(
+            Set(mergedVisit?.photos.map(\.assetLocalIdentifier) ?? [])
+                == ["first-photo", "second-photo"]
+        )
+        #expect(mergedVisit?.photos.filter(\.isPrimary).count == 1)
+        #expect(mergedVisit?.latitude == 40.7419)
+        #expect(mergedVisit?.longitude == -73.9898)
+        #expect(mergedVisit?.updatedAt == updateDate)
+        #expect(visits.contains { $0.id == untouched.id })
+    }
+
+    @MainActor
     @Test("Journal backup round-trips visit metadata without copying photo pixels")
     func journalBackupRoundTrips() throws {
         let visit = Visit(

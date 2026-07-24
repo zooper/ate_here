@@ -275,13 +275,18 @@ struct AutomaticPhotoScanService {
         guard access == .full || access == .limited else { return 0 }
 
         let importedPhotos = try modelContext.fetch(FetchDescriptor<VisitPhoto>())
-        let pendingPhotos = try modelContext.fetch(FetchDescriptor<PendingVisitPhoto>())
+        let pendingVisits = try modelContext.fetch(FetchDescriptor<PendingVisit>())
         let ignoredPhotos = try modelContext.fetch(FetchDescriptor<IgnoredPhotoAsset>())
         let excludedIdentifiers = Set(
             importedPhotos.map(\.assetLocalIdentifier)
-                + pendingPhotos.map(\.assetLocalIdentifier)
+                + pendingVisits.flatMap { $0.photos.map(\.assetLocalIdentifier) }
                 + ignoredPhotos.map(\.assetLocalIdentifier)
         )
+        var activePendingVisits = coalesce(
+            pendingVisits,
+            in: modelContext
+        )
+        var didChangePendingVisits = activePendingVisits.count != pendingVisits.count
 
         let scanner = PhotoImportScanner(
             photoLibraryService: photoLibraryService,
@@ -305,14 +310,83 @@ struct AutomaticPhotoScanService {
             return !homeExclusionRegion.contains(candidate)
         }
 
+        var addedCount = 0
         for candidate in suggestedCandidates {
-            modelContext.insert(PendingVisit(candidate: candidate, detectedAt: now))
+            if let pendingVisit = activePendingVisits.first(where: {
+                candidatesBelongToSameVisit($0.candidate, candidate)
+            }) {
+                pendingVisit.absorb(candidate)
+            } else {
+                let pendingVisit = PendingVisit(candidate: candidate, detectedAt: now)
+                modelContext.insert(pendingVisit)
+                activePendingVisits.append(pendingVisit)
+                addedCount += 1
+            }
+            didChangePendingVisits = true
         }
-        if !suggestedCandidates.isEmpty {
+        if didChangePendingVisits {
             try modelContext.save()
         }
         UserDefaults.standard.set(now, forKey: AutomaticPhotoScanSettings.lastScanDateKey)
-        return suggestedCandidates.count
+        return addedCount
+    }
+
+    private func coalesce(
+        _ pendingVisits: [PendingVisit],
+        in modelContext: ModelContext
+    ) -> [PendingVisit] {
+        var survivors = pendingVisits.sorted { $0.visitedAt < $1.visitedAt }
+        var targetIndex = 0
+
+        while targetIndex < survivors.count {
+            var candidateIndex = targetIndex + 1
+            while candidateIndex < survivors.count {
+                let target = survivors[targetIndex]
+                let candidate = survivors[candidateIndex]
+                if candidatesBelongToSameVisit(target.candidate, candidate.candidate) {
+                    target.absorb(candidate)
+                    modelContext.delete(candidate)
+                    survivors.remove(at: candidateIndex)
+                } else {
+                    candidateIndex += 1
+                }
+            }
+            targetIndex += 1
+        }
+
+        return survivors
+    }
+
+    private func candidatesBelongToSameVisit(
+        _ first: DetectedVisitCandidate,
+        _ second: DetectedVisitCandidate
+    ) -> Bool {
+        let photos = candidateMetadata(first) + candidateMetadata(second)
+        return VisitClusteringService().clusters(from: photos).count == 1
+    }
+
+    private func candidateMetadata(
+        _ candidate: DetectedVisitCandidate
+    ) -> [PhotoMetadata] {
+        let metadata = candidate.photos.compactMap { photo -> PhotoMetadata? in
+            guard let capturedAt = photo.capturedAt else { return nil }
+            return PhotoMetadata(
+                assetIdentifier: photo.assetLocalIdentifier,
+                capturedAt: capturedAt,
+                latitude: photo.latitude,
+                longitude: photo.longitude
+            )
+        }
+        guard metadata.isEmpty else { return metadata }
+
+        return [
+            PhotoMetadata(
+                assetIdentifier: candidate.id,
+                capturedAt: candidate.visitedAt,
+                latitude: candidate.latitude,
+                longitude: candidate.longitude
+            ),
+        ]
     }
 }
 

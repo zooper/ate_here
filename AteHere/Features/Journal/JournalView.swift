@@ -54,6 +54,10 @@ struct JournalView: View {
     @State private var isPresentingSettings = false
     @State private var automaticScanRequestID = UUID()
     @State private var isAutomaticScanRunning = false
+    @State private var isSelectingVisits = false
+    @State private var selectedVisitIDs: Set<UUID> = []
+    @State private var isConfirmingVisitMerge = false
+    @State private var journalPersistenceError: Error?
 
     init(
         placeSearchService: any PlaceSearchService = MapKitPlaceSearchService(),
@@ -79,42 +83,92 @@ struct JournalView: View {
             .toolbarBackground(AlbumTheme.paper, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Menu {
-                        Button {
-                            isPresentingNewVisit = true
-                        } label: {
-                            Label("Add visit", systemImage: "square.and.pencil")
+                ToolbarItem(placement: .cancellationAction) {
+                    if isSelectingVisits {
+                        Button("Cancel", action: stopSelectingVisits)
+                    } else if visits.count >= 2 {
+                        Button("Select") {
+                            isSelectingVisits = true
                         }
-
-                        Button {
-                            isPresentingPhotoImport = true
-                        } label: {
-                            Label("Import recent photos", systemImage: "photo.on.rectangle.angled")
-                        }
-
-                        if !pendingVisits.isEmpty {
-                            Button {
-                                isPresentingPendingVisits = true
-                            } label: {
-                                Label(
-                                    "Review \(pendingVisits.count) match\(pendingVisits.count == 1 ? "" : "es")",
-                                    systemImage: "tray.full"
-                                )
-                            }
-                        }
-
-                        Divider()
-
-                        Button {
-                            isPresentingSettings = true
-                        } label: {
-                            Label("Settings", systemImage: "gearshape")
-                        }
-                    } label: {
-                        Label("Add", systemImage: "plus")
+                        .accessibilityIdentifier("selectJournalVisits")
                     }
                 }
+
+                ToolbarItem(placement: .primaryAction) {
+                    if isSelectingVisits {
+                        Button(
+                            selectedVisitIDs.isEmpty
+                                ? "Merge"
+                                : "Merge \(selectedVisitIDs.count)",
+                            action: { isConfirmingVisitMerge = true }
+                        )
+                        .fontWeight(.semibold)
+                        .disabled(selectedVisitIDs.count < 2)
+                        .accessibilityIdentifier("mergeJournalVisits")
+                    } else {
+                        Menu {
+                            Button {
+                                isPresentingNewVisit = true
+                            } label: {
+                                Label("Add visit", systemImage: "square.and.pencil")
+                            }
+
+                            Button {
+                                isPresentingPhotoImport = true
+                            } label: {
+                                Label(
+                                    "Import recent photos",
+                                    systemImage: "photo.on.rectangle.angled"
+                                )
+                            }
+
+                            if !pendingVisits.isEmpty {
+                                Button {
+                                    isPresentingPendingVisits = true
+                                } label: {
+                                    Label(
+                                        "Review \(pendingVisits.count) match\(pendingVisits.count == 1 ? "" : "es")",
+                                        systemImage: "tray.full"
+                                    )
+                                }
+                            }
+
+                            Divider()
+
+                            Button {
+                                isPresentingSettings = true
+                            } label: {
+                                Label("Settings", systemImage: "gearshape")
+                            }
+                        } label: {
+                            Label("Add", systemImage: "plus")
+                        }
+                    }
+                }
+            }
+            .alert(
+                "Merge \(selectedVisitIDs.count) visits?",
+                isPresented: $isConfirmingVisitMerge
+            ) {
+                Button("Cancel", role: .cancel) {}
+                Button("Merge Visits") {
+                    mergeSelectedVisits()
+                }
+            } message: {
+                Text(
+                    "Photos, restaurant details, rating, notes, and tags will be combined into one journal entry. This can’t be undone."
+                )
+            }
+            .alert(
+                "Visits couldn’t be merged",
+                isPresented: Binding(
+                    get: { journalPersistenceError != nil },
+                    set: { if !$0 { journalPersistenceError = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Your journal wasn’t changed. Try again in a moment.")
             }
             .sheet(isPresented: $isPresentingNewVisit) {
                 VisitEditorView(
@@ -200,7 +254,7 @@ struct JournalView: View {
             LazyVStack(spacing: 30) {
                 AlbumCoverHeader(visits: visits)
 
-                if !pendingVisits.isEmpty {
+                if !isSelectingVisits, !pendingVisits.isEmpty {
                     ReviewInboxBanner(
                         count: pendingVisits.count,
                         isScanning: isAutomaticScanRunning
@@ -213,7 +267,10 @@ struct JournalView: View {
                     AlbumMonthPage(
                         month: month,
                         placeSearchService: placeSearchService,
-                        photoLibraryService: photoLibraryService
+                        photoLibraryService: photoLibraryService,
+                        isSelecting: isSelectingVisits,
+                        selectedVisitIDs: selectedVisitIDs,
+                        onToggleSelection: toggleVisitSelection
                     )
                 }
             }
@@ -238,6 +295,35 @@ struct JournalView: View {
             )
         }
         .sorted { $0.monthStart > $1.monthStart }
+    }
+
+    private func toggleVisitSelection(_ visitID: UUID) {
+        if selectedVisitIDs.contains(visitID) {
+            selectedVisitIDs.remove(visitID)
+        } else {
+            selectedVisitIDs.insert(visitID)
+        }
+    }
+
+    private func stopSelectingVisits() {
+        selectedVisitIDs.removeAll()
+        isSelectingVisits = false
+    }
+
+    private func mergeSelectedVisits() {
+        do {
+            guard try VisitMergeService.merge(
+                visitIDs: selectedVisitIDs,
+                from: visits,
+                in: modelContext
+            ) != nil else {
+                return
+            }
+            stopSelectingVisits()
+        } catch {
+            modelContext.rollback()
+            journalPersistenceError = error
+        }
     }
 
     @MainActor
@@ -1065,6 +1151,9 @@ private struct AlbumMonthPage: View {
     let month: AlbumMonth
     let placeSearchService: any PlaceSearchService
     let photoLibraryService: any PhotoLibraryService
+    let isSelecting: Bool
+    let selectedVisitIDs: Set<UUID>
+    let onToggleSelection: (UUID) -> Void
 
     private let columns = [
         GridItem(.flexible(), spacing: 16),
@@ -1089,25 +1178,76 @@ private struct AlbumMonthPage: View {
 
             LazyVGrid(columns: columns, alignment: .center, spacing: 24) {
                 ForEach(Array(month.visits.enumerated()), id: \.element.id) { index, visit in
-                    NavigationLink {
-                        VisitDetailView(
-                            visit: visit,
-                            placeSearchService: placeSearchService,
-                            photoLibraryService: photoLibraryService
+                    if isSelecting {
+                        Button {
+                            onToggleSelection(visit.id)
+                        } label: {
+                            selectableCard(
+                                visit: visit,
+                                rotation: index.isMultiple(of: 2) ? -0.7 : 0.6
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(selectionAccessibilityLabel(for: visit))
+                        .accessibilityValue(
+                            selectedVisitIDs.contains(visit.id) ? "Selected" : "Not selected"
                         )
-                    } label: {
-                        AlbumVisitCard(
-                            visit: visit,
-                            placeSearchService: placeSearchService,
-                            photoLibraryService: photoLibraryService,
-                            rotation: index.isMultiple(of: 2) ? -0.7 : 0.6
-                        )
+                        .accessibilityIdentifier("selectJournalVisit-\(visit.id.uuidString)")
+                    } else {
+                        NavigationLink {
+                            VisitDetailView(
+                                visit: visit,
+                                placeSearchService: placeSearchService,
+                                photoLibraryService: photoLibraryService
+                            )
+                        } label: {
+                            AlbumVisitCard(
+                                visit: visit,
+                                placeSearchService: placeSearchService,
+                                photoLibraryService: photoLibraryService,
+                                rotation: index.isMultiple(of: 2) ? -0.7 : 0.6
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("visitRow")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("visitRow")
                 }
             }
         }
+    }
+
+    private func selectableCard(visit: Visit, rotation: Double) -> some View {
+        ZStack(alignment: .topTrailing) {
+            AlbumVisitCard(
+                visit: visit,
+                placeSearchService: placeSearchService,
+                photoLibraryService: photoLibraryService,
+                rotation: rotation
+            )
+
+            Image(
+                systemName: selectedVisitIDs.contains(visit.id)
+                    ? "checkmark.circle.fill"
+                    : "circle"
+            )
+            .font(.title2)
+            .foregroundStyle(
+                selectedVisitIDs.contains(visit.id)
+                    ? AlbumTheme.burgundy
+                    : AlbumTheme.mutedInk
+            )
+            .background {
+                Circle()
+                    .fill(AlbumTheme.photoPaper)
+            }
+            .padding(8)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private func selectionAccessibilityLabel(for visit: Visit) -> String {
+        let placeName = visit.userDefinedPlaceName ?? "restaurant visit"
+        return "Select \(placeName) from \(visit.visitedAt.formatted(date: .abbreviated, time: .omitted))"
     }
 }
 

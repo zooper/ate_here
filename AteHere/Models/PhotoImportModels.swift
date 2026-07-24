@@ -73,6 +73,44 @@ final class PendingVisit {
         photos = candidate.photos.map(PendingVisitPhoto.init)
     }
 
+    func absorb(_ candidate: DetectedVisitCandidate) {
+        let existingIdentifiers = Set(photos.map(\.assetLocalIdentifier))
+        for draft in candidate.photos
+        where !existingIdentifiers.contains(draft.assetLocalIdentifier) {
+            photos.append(PendingVisitPhoto(draft: draft))
+        }
+
+        visitedAt = min(visitedAt, candidate.visitedAt)
+        foodCategories = Array(
+            Set(foodCategories).union(candidate.foodCategories)
+        ).sorted()
+        updateLocation(
+            fallbackLatitude: candidate.latitude,
+            fallbackLongitude: candidate.longitude
+        )
+        normalizePrimaryPhoto()
+    }
+
+    func absorb(_ other: PendingVisit) {
+        let existingIdentifiers = Set(photos.map(\.assetLocalIdentifier))
+        for photo in other.photos
+        where !existingIdentifiers.contains(photo.assetLocalIdentifier) {
+            photo.pendingVisit = self
+            photos.append(photo)
+        }
+
+        visitedAt = min(visitedAt, other.visitedAt)
+        detectedAt = min(detectedAt, other.detectedAt)
+        foodCategories = Array(
+            Set(foodCategories).union(other.foodCategories)
+        ).sorted()
+        updateLocation(
+            fallbackLatitude: other.latitude,
+            fallbackLongitude: other.longitude
+        )
+        normalizePrimaryPhoto()
+    }
+
     var candidate: DetectedVisitCandidate {
         DetectedVisitCandidate(
             id: id,
@@ -82,6 +120,40 @@ final class PendingVisit {
             photos: photos.map(\.draft),
             foodCategories: foodCategories
         )
+    }
+
+    private func updateLocation(
+        fallbackLatitude: Double?,
+        fallbackLongitude: Double?
+    ) {
+        let locatedPhotos = photos.compactMap { photo -> (Double, Double)? in
+            guard let latitude = photo.latitude, let longitude = photo.longitude else {
+                return nil
+            }
+            return (latitude, longitude)
+        }
+        guard !locatedPhotos.isEmpty else {
+            if latitude == nil || longitude == nil {
+                latitude = fallbackLatitude
+                longitude = fallbackLongitude
+            }
+            return
+        }
+
+        latitude = locatedPhotos.map(\.0).reduce(0, +) / Double(locatedPhotos.count)
+        longitude = locatedPhotos.map(\.1).reduce(0, +) / Double(locatedPhotos.count)
+    }
+
+    private func normalizePrimaryPhoto() {
+        guard let primaryPhoto = photos.min(by: {
+            ($0.capturedAt ?? .distantFuture) < ($1.capturedAt ?? .distantFuture)
+        }) else {
+            return
+        }
+
+        for photo in photos {
+            photo.isPrimary = photo === primaryPhoto
+        }
     }
 }
 
@@ -124,5 +196,29 @@ final class IgnoredPhotoAsset {
     init(assetLocalIdentifier: String, ignoredAt: Date = .now) {
         self.assetLocalIdentifier = assetLocalIdentifier
         self.ignoredAt = ignoredAt
+    }
+}
+
+@MainActor
+enum PendingVisitMergeService {
+    static func merge(
+        visitIDs: Set<String>,
+        from pendingVisits: [PendingVisit],
+        in modelContext: ModelContext
+    ) throws -> PendingVisit? {
+        let selectedVisits = pendingVisits.filter { visitIDs.contains($0.id) }
+        guard selectedVisits.count >= 2,
+              let target = selectedVisits.min(by: {
+                  $0.visitedAt < $1.visitedAt
+              }) else {
+            return nil
+        }
+
+        for pendingVisit in selectedVisits where pendingVisit !== target {
+            target.absorb(pendingVisit)
+            modelContext.delete(pendingVisit)
+        }
+        try modelContext.save()
+        return target
     }
 }
