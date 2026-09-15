@@ -141,8 +141,9 @@ struct JournalView: View {
                                 Label("Settings", systemImage: "gearshape")
                             }
                         } label: {
-                            Label("Add", systemImage: "plus")
+                            Label("Menu", systemImage: "ellipsis.circle")
                         }
+                        .accessibilityIdentifier("journalMenu")
                     }
                 }
             }

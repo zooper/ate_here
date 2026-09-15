@@ -249,6 +249,7 @@ struct PendingVisitsView: View {
     @State private var persistenceError: Error?
     @State private var isSelecting = false
     @State private var selectedVisitIDs: Set<String> = []
+    @State private var isShowingDeleteConfirmation = false
 
     var body: some View {
         NavigationStack {
@@ -270,7 +271,7 @@ struct PendingVisitsView: View {
                         } footer: {
                             Text(
                                 isSelecting
-                                    ? "Choose two or more matches from the same outing."
+                                    ? "Select matches to merge or dismiss."
                                     : "Open a match to confirm the restaurant. Dismiss removes it from future scans."
                             )
                         }
@@ -296,7 +297,16 @@ struct PendingVisitsView: View {
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
-                    if !isSelecting, pendingVisits.count >= 2 {
+                    if isSelecting {
+                        Button(selectedVisitIDs.count == pendingVisits.count ? "Deselect All" : "Select All") {
+                            if selectedVisitIDs.count == pendingVisits.count {
+                                selectedVisitIDs.removeAll()
+                            } else {
+                                selectedVisitIDs = Set(pendingVisits.map(\.id))
+                            }
+                        }
+                        .accessibilityIdentifier("selectAllPendingVisits")
+                    } else if pendingVisits.count >= 2 {
                         Button("Select") {
                             isSelecting = true
                         }
@@ -317,6 +327,14 @@ struct PendingVisitsView: View {
                         .fontWeight(.semibold)
                         .disabled(selectedVisitIDs.count < 2)
                         .accessibilityIdentifier("mergePendingVisits")
+
+                        Spacer()
+
+                        Button("Delete \(selectedVisitIDs.count)", role: .destructive) {
+                            isShowingDeleteConfirmation = true
+                        }
+                        .disabled(selectedVisitIDs.isEmpty)
+                        .accessibilityIdentifier("deleteSelectedPendingVisits")
                     }
                 }
             }
@@ -341,6 +359,18 @@ struct PendingVisitsView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text("Try again in a moment.")
+        }
+        .confirmationDialog(
+            "Delete selected matches?",
+            isPresented: $isShowingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Matches", role: .destructive) {
+                dismissSelectedMatches()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("These suggestions will be removed and their photos will not be suggested again.")
         }
     }
 
@@ -422,14 +452,27 @@ struct PendingVisitsView: View {
     }
 
     private func dismissMatch(_ pendingVisit: PendingVisit) {
+        dismissMatches([pendingVisit])
+    }
+
+    private func dismissSelectedMatches() {
+        let selectedVisits = pendingVisits.filter { selectedVisitIDs.contains($0.id) }
+        dismissMatches(selectedVisits)
+    }
+
+    private func dismissMatches(_ visits: [PendingVisit]) {
+        guard !visits.isEmpty else { return }
         do {
-            for photo in pendingVisit.photos {
-                modelContext.insert(
-                    IgnoredPhotoAsset(assetLocalIdentifier: photo.assetLocalIdentifier)
-                )
+            for visit in visits {
+                for photo in visit.photos {
+                    modelContext.insert(
+                        IgnoredPhotoAsset(assetLocalIdentifier: photo.assetLocalIdentifier)
+                    )
+                }
+                modelContext.delete(visit)
             }
-            modelContext.delete(pendingVisit)
             try modelContext.save()
+            stopSelecting()
         } catch {
             modelContext.rollback()
             persistenceError = error

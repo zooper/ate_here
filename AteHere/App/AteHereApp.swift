@@ -183,7 +183,7 @@ private struct AteHereRootView: View {
     var body: some View {
         AteHereTabView()
             .task(id: backupRevision) {
-                guard iCloudBackupEnabled, !visits.isEmpty else { return }
+                guard iCloudBackupEnabled else { return }
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled else { return }
                 _ = try? await JournalBackupOperations.backUp(context: modelContext)

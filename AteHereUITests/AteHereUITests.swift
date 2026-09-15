@@ -65,7 +65,7 @@ final class AteHereUITests: XCTestCase {
         let app = makeApp()
         app.launch()
 
-        app.buttons["Add"].tap()
+        app.buttons["journalMenu"].tap()
         app.buttons["Settings"].tap()
 
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 2))
@@ -85,7 +85,7 @@ final class AteHereUITests: XCTestCase {
         let app = makeApp()
         app.launch()
 
-        app.buttons["Add"].tap()
+        app.buttons["journalMenu"].tap()
         app.buttons["Settings"].tap()
         XCTAssertTrue(app.buttons["setHomeArea"].waitForExistence(timeout: 2))
         app.buttons["setHomeArea"].tap()
@@ -193,6 +193,25 @@ final class AteHereUITests: XCTestCase {
         app.buttons["mergePendingVisits"].tap()
 
         XCTAssertTrue(app.navigationBars["Review Visit"].waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    func testPendingMatchesCanAllBeDeleted() throws {
+        let app = makeApp()
+        app.launchEnvironment["ATE_HERE_UI_TEST_PENDING_VISITS"] = "1"
+        app.launch()
+
+        app.buttons["Review 2 Matches"].tap()
+        XCTAssertTrue(app.navigationBars["Review Matches"].waitForExistence(timeout: 2))
+        app.buttons["selectPendingVisits"].tap()
+        app.buttons["selectAllPendingVisits"].tap()
+
+        XCTAssertTrue(app.buttons["deleteSelectedPendingVisits"].isEnabled)
+        app.buttons["deleteSelectedPendingVisits"].tap()
+        XCTAssertTrue(app.buttons["Delete Matches"].waitForExistence(timeout: 2))
+        app.buttons["Delete Matches"].tap()
+
+        XCTAssertTrue(app.staticTexts["Nothing waiting"].waitForExistence(timeout: 2))
     }
 
     @MainActor
